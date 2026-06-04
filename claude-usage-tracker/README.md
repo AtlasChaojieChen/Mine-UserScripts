@@ -17,14 +17,18 @@ It does not estimate or guess. It reads the exact values Claude already exposes 
 - **Collapsible pill mode** — shrink to a compact `session% / weekly%` pill.
 - **Plan-aware UI** — rows appear only for plans that expose them.
 - **Severity colour ramp** — one continuous green → red scale drives every ring, bar, and chart point; colour and glow encode how close you are to a limit.
+- **Tampermonkey menu commands** — refresh, collapse, reset position, and clear local history without touching the widget.
+- **Auto-updates** — installs and updates straight from the raw GitHub file.
 - **Single file, no build step, no external app.** Just a userscript.
 
 ## Installation
 
 1. Install the [Tampermonkey](https://www.tampermonkey.net/) browser extension (Violentmonkey or Greasemonkey also work).
-2. Open the raw [`claude-usage-tracker.user.js`](./claude-usage-tracker.user.js) file. Tampermonkey should detect it and offer to install.
+2. Click to install: **[claude-usage-tracker.user.js](https://raw.githubusercontent.com/AtlasChaojieChen/Mine-UserScripts/main/claude-usage-tracker/claude-usage-tracker.user.js)** — Tampermonkey detects the `.user.js` file and opens its install page.
 3. Click **Install**.
 4. Open `https://claude.ai` — the widget appears as a floating dashboard.
+
+Once installed, Tampermonkey checks the raw file for new versions automatically and prompts you to update when `@version` is bumped.
 
 If your script manager doesn't detect the raw file automatically:
 
@@ -39,6 +43,7 @@ If your script manager doesn't detect the raw file automatically:
 - **Drag** it anywhere; it snaps to the nearest corner and remembers where you left it.
 - **Click** to collapse to the pill, click again to expand.
 - **Hover** the ring to swap the centre number between session and weekly.
+- **Tampermonkey menu** (extension icon → this script) offers quick actions: *Refresh now*, *Toggle collapsed*, *Reset position*, and *Clear 7-day history*.
 
 If you are not logged in (or the usage endpoints are unreachable) the widget shows an error card instead of data.
 
@@ -55,7 +60,7 @@ Extra Usage that is available but switched off shows `On/Off` + `N/A`; on Free (
 ## Notes
 
 - **The 7-day chart is reconstructed locally.** Claude's API only returns the *current* weekly utilisation, not history. The script attributes each increase since the last poll to today and shifts the window on date rollover, so the chart fills in over time as you use it — it can't backfill days before the script was installed.
-- This script does **not** modify Claude's backend or bypass any usage limit. It only reads and displays information in your browser via `localStorage`.
+- This script does **not** modify Claude's backend or bypass any usage limit. It only reads and displays information in your browser; your position, collapsed state, and the local chart history are stored privately through your userscript manager (`GM_setValue`).
 
 ## Roadmap
 
