@@ -13,16 +13,13 @@ There is **no build system, package manager, test suite, or linter** — the del
 - `claude-usage-tracker.user.js` — the **deliverable**: the complete userscript (config → colour ramp → storage/positioning → CSS → component builders → views → data layer). This is the only file an end user installs.
 - `README.md` — user-facing spec: features, supported plans, data sources, and the colour ramp.
 - `CHANGELOG.md` — version history.
-- `docs/design/final-mockup.html` — a static HTML gallery assembling the UI design (no network/storage/polling). The visual reference; iterate here before porting changes into the userscript.
-- `docs/design/test-harness.html` — loads the widget against captured claude.ai payloads (Pro/Free states) so you can verify render logic without a live login.
-- `docs/specs/` — design notes and specs.
+- `final-mockup.html` — a static HTML gallery assembling the UI design (no network/storage/polling). The visual reference; iterate here before porting changes into the userscript.
 
 The userscript was composed from three earlier UI lineages — **Editorial** (shell/header/pill/chart/error), **Glass** (weekly panel), and **Allowance** (rings/timers/size + the `localStorage` data layer). Those source `.js` files are gone; the mockup carries the canonical UI design and the userscript carries the working fetch/render/polling layer.
 
 ## Developing & testing
 
-- **Preview the mockup:** open `docs/design/final-mockup.html` in a browser and refresh after edits. If a feature is blocked on `file://` (or you need automated screenshots), serve it: `python -m http.server 8777` then open `http://localhost:8777/docs/design/final-mockup.html`. The page renders every state (Pro on/off, Free, collapsed pill, error) in one gallery via demo `STATE` objects.
-- **Test render logic offline:** open `docs/design/test-harness.html` — it stubs `fetch` with real captured payloads so the widget renders without logging into claude.ai.
+- **Preview the mockup:** open `final-mockup.html` in a browser and refresh after edits. If a feature is blocked on `file://` (or you need automated screenshots), serve it: `python -m http.server 8777` then open `http://localhost:8777/final-mockup.html` (stop the server when done — orphaned `http.server` processes lock the folder). The page renders every state (Pro on/off, Free, collapsed pill, error) in one gallery via demo `STATE` objects.
 - **Test the real userscript:** Tampermonkey → Create new script → paste the `.js` → save → reload `claude.ai`. It only produces real data while logged into claude.ai; otherwise it shows the error card.
 - There are no unit tests. Verification means rendering in a browser and checking behaviour against `README.md`.
 

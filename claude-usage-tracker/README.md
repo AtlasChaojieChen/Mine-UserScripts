@@ -68,7 +68,7 @@ Extra Usage that is available but switched off shows `On/Off` + `N/A`; on Free (
 
 ## Development
 
-This is a single-file userscript — there is no build system, package manager, or test suite. See [`CLAUDE.md`](./CLAUDE.md) for architecture and the Claude API endpoints it depends on, and [`docs/`](./docs) for the design mockup, an offline test harness, and specs.
+This is a single-file userscript — there is no build system, package manager, or test suite. See [`CLAUDE.md`](./CLAUDE.md) for architecture and the Claude API endpoints it depends on, and [`final-mockup.html`](./final-mockup.html) for the UI design reference (open it in a browser).
 
 ## Licence
 

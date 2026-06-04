@@ -26,7 +26,7 @@ UserScripts/
     ├── <script-name>.user.js       the installable userscript
     ├── README.md                   what it does + how to install
     ├── CHANGELOG.md                version history
-    └── docs/                       design notes, mockups, specs (optional)
+    └── ...                         optional extras (e.g. a design mockup)
 ```
 
 ### Adding a new script
