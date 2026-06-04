@@ -1,12 +1,19 @@
 // ==UserScript==
 // @name         Claude Usage Tracker
 // @namespace    https://github.com/atlas/claude-usage-tracker
-// @version      1.0.0
+// @version      2.0.0
 // @description  Floating usage dashboard for claude.ai — session/weekly rings, routines, extra-usage credits, reset timers, and a locally reconstructed 7-day chart. Reads the exact values Claude exposes in Settings → Usage.
 // @author       atlas
 // @match        https://claude.ai/*
+// @downloadURL  https://raw.githubusercontent.com/AtlasChaojieChen/Mine-UserScripts/main/claude-usage-tracker/claude-usage-tracker.user.js
+// @updateURL    https://raw.githubusercontent.com/AtlasChaojieChen/Mine-UserScripts/main/claude-usage-tracker/claude-usage-tracker.user.js
 // @icon         https://claude.ai/favicon.ico
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
+// @connect      claude.ai
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -14,9 +21,7 @@
 (function () {
     'use strict';
 
-    /* =====================================================================
-     1. CONFIG / CONSTANTS
-     ===================================================================== */
+    /* === 1. Config / constants === */
     const POLL_MS = 60000; // re-read usage every 60s
     const CREDIT_DIVISOR = 100; // extra_usage amounts are in cents → dollars
     const POS_KEY = 'cut_pos';
@@ -32,10 +37,8 @@
         'anthropic-client-platform': 'web_claude_ai',
     };
     const PRO_ROUTINE_LIMIT = 5;
-    /* =====================================================================
-     2. COLOUR RAMP  — continuous, glow-aware, re-anchored to Editorial green.
-        (Ported verbatim from the design mockup.)
-     ===================================================================== */
+
+    /* === 2. Colour ramp (continuous, glow-aware; ported from the design mockup) === */
     const RAMP = [
         { stop: 0, color: [124, 184, 124] }, // #7cb87c  Editorial low
         { stop: 25, color: [124, 184, 124] }, // hold green across 0–25
@@ -45,50 +48,49 @@
         { stop: 88, color: [237, 77, 58] }, // #ed4d3a  crit
         { stop: 100, color: [237, 77, 58] },
     ];
-    const lerp = (a, b, t) => a + (b - a) * t;
-    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-    function rampRGB(pct) {
-        const p = clamp(pct, 0, 100);
+    const Lerp = (a, b, t) => a + (b - a) * t;
+    const Clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    function RampRgb(pct) {
+        const p = Clamp(pct, 0, 100);
         for (let i = 1; i < RAMP.length; i++) {
             if (p <= RAMP[i].stop) {
                 const a = RAMP[i - 1],
                     b = RAMP[i];
                 const t = (p - a.stop) / Math.max(1, b.stop - a.stop);
                 return [0, 1, 2].map((k) =>
-                    Math.round(lerp(a.color[k], b.color[k], t))
+                    Math.round(Lerp(a.color[k], b.color[k], t))
                 );
             }
         }
         return RAMP[RAMP.length - 1].color.slice();
     }
-    const rampColor = (pct) => `rgb(${rampRGB(pct).join(', ')})`;
-    const rampGlowCss = (pct) => `rgba(${rampRGB(pct).join(', ')}, 0.5)`;
-    const ringGlow = (pct) =>
-        Math.min(1, 0.3 + (clamp(pct, 0, 100) / 100) * 0.8).toFixed(3);
+    const RampColor = (pct) => `rgb(${RampRgb(pct).join(', ')})`;
+    const RampGlowCss = (pct) => `rgba(${RampRgb(pct).join(', ')}, 0.5)`;
+    const RingGlow = (pct) =>
+        Math.min(1, 0.3 + (Clamp(pct, 0, 100) / 100) * 0.8).toFixed(3);
 
-    /* =====================================================================
-     3. STORAGE + POSITIONING
-     ===================================================================== */
-    function loadJSON(key, fallback) {
+    /* === 3. Storage (GM-native) + positioning === */
+    // GM_getValue stores native objects, so no JSON (de)serialisation is needed.
+    function LoadValue(key, fallback) {
         try {
-            const v = localStorage.getItem(key);
-            return v == null ? fallback : JSON.parse(v);
+            const v = GM_getValue(key, undefined);
+            return v === undefined ? fallback : v;
         } catch {
             return fallback;
         }
     }
-    function saveJSON(key, value) {
+    function SaveValue(key, value) {
         try {
-            localStorage.setItem(key, JSON.stringify(value));
+            GM_setValue(key, value);
         } catch {
             /* quota / private mode */
         }
     }
 
-    const defaultPos = () => ({ corner: 'br', dx: 20, dy: 20 });
+    const DefaultPos = () => ({ corner: 'br', dx: 20, dy: 20 });
 
     // Subtle width-based scale so the widget feels right on small + large screens.
-    const computeScale = () => clamp(window.innerWidth / 1600, 0.8, 1.0);
+    const ComputeScale = () => Clamp(window.innerWidth / 1600, 0.8, 1.0);
 
     const ORIGIN = {
         tl: 'top left',
@@ -98,10 +100,10 @@
     };
 
     // Edge-anchored placement: nearest corner + offset, so it survives resize.
-    function applyPos(host) {
+    function ApplyPos(host) {
         if (!host) return;
-        const pos = loadJSON(POS_KEY, defaultPos());
-        host.style.transform = `scale(${computeScale()})`;
+        const pos = LoadValue(POS_KEY, DefaultPos());
+        host.style.transform = `scale(${ComputeScale()})`;
         host.style.transformOrigin = ORIGIN[pos.corner] || ORIGIN.br;
         host.style.left =
             host.style.right =
@@ -114,7 +116,7 @@
         else host.style.bottom = pos.dy + 'px';
     }
 
-    function persistCorner(host) {
+    function PersistCorner(host) {
         const r = host.getBoundingClientRect();
         const vw = window.innerWidth,
             vh = window.innerHeight;
@@ -124,7 +126,7 @@
             bottom = vh - r.bottom;
         const vert = top <= bottom ? 't' : 'b';
         const horiz = left <= right ? 'l' : 'r';
-        saveJSON(POS_KEY, {
+        SaveValue(POS_KEY, {
             corner: vert + horiz,
             dx: Math.max(0, Math.round(horiz === 'l' ? left : right)),
             dy: Math.max(0, Math.round(vert === 't' ? top : bottom)),
@@ -132,7 +134,7 @@
     }
 
     // Custom drag with a movement threshold separating click from drag.
-    function makeDraggable(host, handle, onClick) {
+    function MakeDraggable(host, handle, onClick) {
         handle.addEventListener('mousedown', (e) => {
             if (e.button !== 0 || e.target.closest('button')) return;
             e.preventDefault();
@@ -150,12 +152,12 @@
                     dy = ev.clientY - startY;
                 if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
                 const r = host.getBoundingClientRect();
-                const nl = clamp(
+                const nl = Clamp(
                     start.left + dx,
                     0,
                     window.innerWidth - r.width
                 );
-                const nt = clamp(
+                const nt = Clamp(
                     start.top + dy,
                     0,
                     window.innerHeight - r.height
@@ -167,8 +169,8 @@
                 document.removeEventListener('mousemove', move);
                 document.removeEventListener('mouseup', up);
                 if (moved) {
-                    persistCorner(host);
-                    applyPos(host);
+                    PersistCorner(host);
+                    ApplyPos(host);
                 } else if (onClick) onClick(ev);
             };
             document.addEventListener('mousemove', move);
@@ -176,10 +178,9 @@
         });
     }
 
-    /* =====================================================================
-     4. CSS  — the widget block from the mockup, vars hoisted onto :host,
-        injected into a Shadow DOM so claude.ai styles can't reach it.
-     ===================================================================== */
+    /* === 4. CSS — widget block from the mockup, injected into Shadow DOM so
+       claude.ai styles can't reach it (:host scoping; GM_addStyle is document-scoped
+       and would break this isolation, so it is intentionally not used) === */
     const CSS = `
   :host {
     --paper: #f5f4ee; --sec: #d6cfc4; --mute: #8b8275; --faint: #5e564e;
@@ -399,39 +400,37 @@
   .err .retry:hover { background: rgba(255, 255, 255, 0.08); }
   `;
 
-    /* =====================================================================
-     5. COMPONENT BUILDERS  (ported verbatim from the mockup)
-     ===================================================================== */
-    const ringDash = (pct, c) => ({
+    /* === 5. Component builders (ported from the mockup) === */
+    const RingDash = (pct, c) => ({
         da: c.toFixed(2),
-        off: (c * (1 - clamp(pct, 0, 100) / 100)).toFixed(2),
+        off: (c * (1 - Clamp(pct, 0, 100) / 100)).toFixed(2),
     });
 
-    function ringSVG(weekly, session) {
+    function RingSvg(weekly, session) {
         const Rc = 2 * Math.PI * 59,
             Ri = 2 * Math.PI * 45;
-        const wo = ringDash(weekly, Rc),
-            wi = ringDash(session, Ri);
+        const wo = RingDash(weekly, Rc),
+            wi = RingDash(session, Ri);
         return `
       <svg class="cut-ring" viewBox="-10 -10 150 150" style="transform:rotate(-90deg)">
         <defs><filter id="cut-ring-glow" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="3.2"/></filter></defs>
         <circle cx="65" cy="65" r="59" fill="none" stroke="rgba(72,65,58,0.45)" stroke-width="10"/>
-        <circle cx="65" cy="65" r="59" fill="none" stroke="${rampColor(weekly)}" stroke-width="10"
-          stroke-dasharray="${wo.da}" stroke-dashoffset="${wo.off}" filter="url(#cut-ring-glow)" opacity="${ringGlow(weekly)}"/>
-        <circle cx="65" cy="65" r="59" fill="none" stroke="${rampColor(weekly)}" stroke-width="10"
+        <circle cx="65" cy="65" r="59" fill="none" stroke="${RampColor(weekly)}" stroke-width="10"
+          stroke-dasharray="${wo.da}" stroke-dashoffset="${wo.off}" filter="url(#cut-ring-glow)" opacity="${RingGlow(weekly)}"/>
+        <circle cx="65" cy="65" r="59" fill="none" stroke="${RampColor(weekly)}" stroke-width="10"
           stroke-dasharray="${wo.da}" stroke-dashoffset="${wo.off}"/>
         <circle cx="65" cy="65" r="45" fill="none" stroke="rgba(72,65,58,0.45)" stroke-width="7"/>
-        <circle cx="65" cy="65" r="45" fill="none" stroke="${rampColor(session)}" stroke-width="7"
-          stroke-dasharray="${wi.da}" stroke-dashoffset="${wi.off}" filter="url(#cut-ring-glow)" opacity="${ringGlow(session)}"/>
-        <circle cx="65" cy="65" r="45" fill="none" stroke="${rampColor(session)}" stroke-width="7"
+        <circle cx="65" cy="65" r="45" fill="none" stroke="${RampColor(session)}" stroke-width="7"
+          stroke-dasharray="${wi.da}" stroke-dashoffset="${wi.off}" filter="url(#cut-ring-glow)" opacity="${RingGlow(session)}"/>
+        <circle cx="65" cy="65" r="45" fill="none" stroke="${RampColor(session)}" stroke-width="7"
           stroke-dasharray="${wi.da}" stroke-dashoffset="${wi.off}"/>
         <circle class="cut-ring-hover" cx="65" cy="65" r="59"/>
       </svg>`;
     }
 
-    function pillMini(weekly, session) {
-        const colW = rampColor(weekly),
-            colH = rampColor(session);
+    function PillMini(weekly, session) {
+        const colW = RampColor(weekly),
+            colH = RampColor(session);
         return `
       <span class="pill-mini">
         <span class="arc-outer" style="background: conic-gradient(${colW} 0% ${weekly}%, rgba(72,65,58,0.45) ${weekly}% 100%)"></span>
@@ -440,7 +439,7 @@
       </span>`;
     }
 
-    function smoothPath(points, tension = 6) {
+    function SmoothPath(points, tension = 6) {
         const ext = [points[0], ...points, points[points.length - 1]];
         let d = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
         for (let i = 1; i < points.length; i++) {
@@ -456,7 +455,7 @@
         }
         return d;
     }
-    function chartHTML(daily) {
+    function ChartHtml(daily) {
         const hasData = daily.some((d) => (d.usage ?? 0) > 0);
         if (!hasData) {
             return `<div class="b-empty">No recent usage data</div>`;
@@ -475,7 +474,7 @@
             d,
             isNull: d.usage == null,
         }));
-        const line = smoothPath(pts);
+        const line = SmoothPath(pts);
         const area =
             line +
             ` L ${pts[pts.length - 1].x.toFixed(2)} ${H} L ${pts[0].x.toFixed(2)} ${H} Z`;
@@ -510,7 +509,7 @@
       </svg>${labels}`;
     }
 
-    function rowHTML({ label, swatch, value, meter, cls }) {
+    function RowHtml({ label, swatch, value, meter, cls }) {
         return `
         <div class="ed-row${cls ? ' ' + cls : ''}">
           <div class="r-top">
@@ -524,7 +523,7 @@
     const GREY = '#5e564e';
     const GOLD = '#c9a96e';
 
-    function weeklyPanelHTML(s) {
+    function WeeklyPanelHtml(s) {
         const w = s.weekly;
         const rows = [];
 
@@ -535,20 +534,20 @@
                 const segs = Array.from(
                     { length: 5 },
                     (_, i) =>
-                        `<span class="pip"><i style="width:${clamp(frac * 5 - i, 0, 1) * 100}%;background:${rampColor(rPct)}"></i></span>`
+                        `<span class="pip"><i style="width:${Clamp(frac * 5 - i, 0, 1) * 100}%;background:${RampColor(rPct)}"></i></span>`
                 ).join('');
 
                 rows.push(
-                    rowHTML({
+                    RowHtml({
                         label: 'Routines',
-                        swatch: rampColor(rPct),
+                        swatch: RampColor(rPct),
                         value: `${s.routines.used}<small> / ${s.routines.limit}</small>`,
                         meter: `<div class="ed-seg">${segs}</div>`,
                     })
                 );
             } else {
                 rows.push(
-                    rowHTML({
+                    RowHtml({
                         label: 'Routines',
                         swatch: GREY,
                         value: '<span class="na">N/A</span>',
@@ -562,7 +561,7 @@
             const on = ex.enabled;
             const exPct = ex.limit ? (ex.spent / ex.limit) * 100 : 0;
             rows.push(
-                rowHTML({
+                RowHtml({
                     label: 'Extra Usage',
                     swatch: on ? '#7cb87c' : GREY,
                     cls: 'row-extra',
@@ -570,19 +569,19 @@
                 })
             );
             rows.push(
-                rowHTML({
+                RowHtml({
                     label: 'Spent',
-                    swatch: on ? rampColor(exPct) : GREY,
+                    swatch: on ? RampColor(exPct) : GREY,
                     value: on
                         ? `$${ex.spent.toFixed(2)}<small>/$${ex.limit}</small>`
                         : '<span class="na">N/A</span>',
                     meter: on
-                        ? `<div class="track"><i style="width:${clamp(exPct, 0, 100)}%;background:${rampColor(exPct)}"></i></div>`
+                        ? `<div class="track"><i style="width:${Clamp(exPct, 0, 100)}%;background:${RampColor(exPct)}"></i></div>`
                         : '',
                 })
             );
             rows.push(
-                rowHTML({
+                RowHtml({
                     label: 'Balance',
                     swatch: on ? GOLD : GREY,
                     value: on
@@ -597,30 +596,28 @@
         <div>
           <div class="wtop">
             <div class="wname">Weekly<small>All models</small></div>
-            <div class="wpct" style="color:${rampColor(w)}">${w}<span class="u">%</span></div>
+            <div class="wpct" style="color:${RampColor(w)}">${w}<span class="u">%</span></div>
           </div>
-          <div class="wbar" style="margin-top:9px"><i style="width:${clamp(w, 0, 100)}%;background:${rampColor(w)}"></i></div>
+          <div class="wbar" style="margin-top:9px"><i style="width:${Clamp(w, 0, 100)}%;background:${RampColor(w)}"></i></div>
         </div>
         <div class="ed-rows">${rows.join('')}</div>
       </div>`;
     }
 
-    /* =====================================================================
-     6. VIEWS  (ported verbatim, with live event wiring in render())
-     ===================================================================== */
-    function hasBreakdown(s) {
+    /* === 6. Views (with live event wiring in Render) === */
+    function HasBreakdown(s) {
         return (
             (s.routines && s.routines.limit > 0) ||
             (s.extra && s.extra.available)
         );
     }
 
-    function ringHTML(s) {
+    function RingHtml(s) {
         const sWide = s.session >= 100 ? ' is-wide' : '';
         const wWide = s.weekly >= 100 ? ' is-wide' : '';
         return `
             <div class="cut-ringwrap">
-              ${ringSVG(s.weekly, s.session)}
+              ${RingSvg(s.weekly, s.session)}
               <div class="cut-ring-center">
                 <div class="cut-pct cut-session${sWide}">
                   <span class="cut-pct-val">${s.session}<span class="u">%</span></span>
@@ -634,15 +631,15 @@
             </div>`;
     }
 
-    function timersHTML(s) {
+    function TimersHtml(s) {
         return `
             <div class="cut-timers">
-              <span class="cut-timers-item"><span class="cut-tdot" style="background:${rampColor(s.session)};box-shadow:0 0 8px ${rampGlowCss(s.session)}"></span>Session · <em>${s.sessionResetIn}</em></span>
-              <span class="cut-timers-item"><span class="cut-tdot" style="background:${rampColor(s.weekly)};box-shadow:0 0 7px ${rampGlowCss(s.weekly)}"></span>Weekly · <em>${s.weeklyResetIn}</em></span>
+              <span class="cut-timers-item"><span class="cut-tdot" style="background:${RampColor(s.session)};box-shadow:0 0 8px ${RampGlowCss(s.session)}"></span>Session · <em>${s.sessionResetIn}</em></span>
+              <span class="cut-timers-item"><span class="cut-tdot" style="background:${RampColor(s.weekly)};box-shadow:0 0 7px ${RampGlowCss(s.weekly)}"></span>Weekly · <em>${s.weeklyResetIn}</em></span>
             </div>`;
     }
 
-    const headerHTML = (s) => `
+    const HeaderHtml = (s) => `
         <div class="ed-top">
           <div class="left">
             <span class="dot"></span>
@@ -659,46 +656,46 @@
           </div>
         </div>`;
 
-    const chartSection = (s) => `
+    const ChartSection = (s) => `
         <div class="ed-daily">
           <div class="head-row"><span class="label">Last 7 Days</span><span class="meta"></span></div>
-          <div class="b-chart-wrap">${chartHTML(s.daily)}</div>
+          <div class="b-chart-wrap">${ChartHtml(s.daily)}</div>
           <div class="lbls">${s.daily.map((d) => `<span class="${d.isToday ? 'today' : ''}">${d.label}</span>`).join('')}</div>
         </div>`;
 
-    function expandedHTML(s) {
-        if (!hasBreakdown(s)) {
+    function ExpandedHtml(s) {
+        if (!HasBreakdown(s)) {
             return `
       <div class="cut card ed-free">
-        ${headerHTML(s)}
+        ${HeaderHtml(s)}
         <div class="ed-solo">
-          ${ringHTML(s)}
-          ${timersHTML(s)}
+          ${RingHtml(s)}
+          ${TimersHtml(s)}
         </div>
       </div>`;
         }
         return `
       <div class="cut card expanded">
-        ${headerHTML(s)}
+        ${HeaderHtml(s)}
         <div class="ed-grid">
-          <div class="ed-leftcol">${ringHTML(s)}${timersHTML(s)}</div>
-          ${weeklyPanelHTML(s)}
+          <div class="ed-leftcol">${RingHtml(s)}${TimersHtml(s)}</div>
+          ${WeeklyPanelHtml(s)}
         </div>
-        ${chartSection(s)}
+        ${ChartSection(s)}
       </div>`;
     }
 
-    function pillHTML(s) {
+    function PillHtml(s) {
         return `
       <div class="cut card collapsed">
-        ${pillMini(s.weekly, s.session)}
+        ${PillMini(s.weekly, s.session)}
         <span class="num">${s.session}<span class="pct">%</span></span>
         <span class="sep">/</span>
         <span class="num">${s.weekly}<span class="pct">%</span></span>
       </div>`;
     }
 
-    function errorHTML(detail) {
+    function ErrorHtml(detail) {
         return `
       <div class="cut card" style="width:236px;">
         <div class="ed-top" style="padding:11px 12px 8px;margin-bottom:0;">
@@ -713,7 +710,7 @@
       </div>`;
     }
 
-    function loadingHTML() {
+    function LoadingHtml() {
         return `
       <div class="cut card collapsed" style="cursor:default">
         <span class="dot loading"></span>
@@ -721,33 +718,54 @@
       </div>`;
     }
 
-    /* =====================================================================
-     7. DATA LAYER
-     ===================================================================== */
+    /* === 7. Data layer === */
     const BASE = location.origin; // https://claude.ai
 
-    async function getJSON(url, opts) {
-        const res = await fetch(
-            url,
-            Object.assign({ credentials: 'include' }, opts || {})
-        );
-        if (!res.ok) {
-            const e = new Error('HTTP ' + res.status);
-            e.status = res.status;
-            throw e;
-        }
-        return res.json();
+    // GM_xmlhttpRequest is a privileged XHR: it sends same-origin cookies, sets any
+    // header, and is immune to page CSP. Promise-wrapped so callers keep using await.
+    function GetJson(url, opts = {}) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: opts.method || 'GET',
+                url,
+                headers: opts.headers || {},
+                responseType: 'json',
+                onload(res) {
+                    if (res.status >= 200 && res.status < 300) {
+                        try {
+                            resolve(
+                                res.response != null
+                                    ? res.response
+                                    : JSON.parse(res.responseText)
+                            );
+                        } catch (e) {
+                            reject(e);
+                        }
+                    } else {
+                        const e = new Error('HTTP ' + res.status);
+                        e.status = res.status;
+                        reject(e);
+                    }
+                },
+                onerror() {
+                    reject(new Error('Network error'));
+                },
+                ontimeout() {
+                    reject(new Error('Timeout'));
+                },
+            });
+        });
     }
 
-    async function getOrg() {
-        const orgs = await getJSON(`${BASE}/api/organizations`);
+    async function GetOrg() {
+        const orgs = await GetJson(`${BASE}/api/organizations`);
         if (!Array.isArray(orgs) || orgs.length === 0)
             throw new Error('No organization');
         const o = orgs[0];
         return { id: o.uuid, caps: o.capabilities || [] };
     }
 
-    function planLabel(caps) {
+    function PlanLabel(caps) {
         const has = (re) => caps.some((c) => re.test(c));
         if (has(/team/i)) return 'Team';
         if (has(/max/i)) return 'Max';
@@ -758,7 +776,7 @@
 
     // Tolerant numeric extraction — the run-budget shape is unverified, so search
     // top-level then one level of nesting for the named key.
-    function pickNum(obj, key) {
+    function PickNum(obj, key) {
         if (obj == null || typeof obj !== 'object') return null;
         if (typeof obj[key] === 'number') return obj[key];
         for (const k in obj) {
@@ -769,23 +787,23 @@
         return null;
     }
 
-    async function fetchRoutines(orgId) {
+    async function FetchRoutines(orgId) {
         try {
-            const r = await getJSON(`${BASE}/v1/code/routines/run-budget`, {
+            const r = await GetJson(`${BASE}/v1/code/routines/run-budget`, {
                 headers: Object.assign(
                     { 'x-organization-uuid': orgId },
                     ROUTINE_HEADERS
                 ),
             });
-            const limit = pickNum(r, 'limit');
+            const limit = PickNum(r, 'limit');
             if (limit == null || limit <= 0) return { used: 0, limit: 0 };
-            return { used: pickNum(r, 'used') ?? 0, limit };
+            return { used: PickNum(r, 'used') ?? 0, limit };
         } catch {
             return { used: 0, limit: 0 }; // unavailable (e.g. Free) → row hidden
         }
     }
 
-    function humanize(iso) {
+    function Humanize(iso) {
         const t = new Date(iso).getTime();
         if (isNaN(t)) return '—';
         let s = Math.max(0, Math.floor((t - Date.now()) / 1000));
@@ -799,8 +817,8 @@
         return `${m}m`;
     }
 
-    /* ---- 7-day chart: reconstructed locally from cumulative weekly % ---- */
-    function localDate(d = new Date()) {
+    /* 7-day chart: reconstructed locally from cumulative weekly % */
+    function LocalDate(d = new Date()) {
         return (
             d.getFullYear() +
             '-' +
@@ -812,14 +830,14 @@
     const WD_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const WD_MINI = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
-    function updateHistory(weekly, resetAt) {
-        const h = loadJSON(HIST_KEY, {
+    function UpdateHistory(weekly, resetAt) {
+        const h = LoadValue(HIST_KEY, {
             days: {},
             lastWeekly: null,
             lastResetAt: null,
         });
         if (typeof h.days !== 'object' || h.days == null) h.days = {};
-        const today = localDate();
+        const today = LocalDate();
         if (h.lastWeekly == null) {
             h.lastWeekly = weekly; // first observation: establish the delta baseline
         } else {
@@ -841,18 +859,18 @@
         for (const k in h.days) {
             if (new Date(k + 'T00:00:00').getTime() < cutoff) delete h.days[k];
         }
-        saveJSON(HIST_KEY, h);
+        SaveValue(HIST_KEY, h);
     }
 
-    function buildDaily(breakdown) {
-        const h = loadJSON(HIST_KEY, { days: {} });
+    function BuildDaily(breakdown) {
+        const h = LoadValue(HIST_KEY, { days: {} });
         const days = h.days || {};
         const now = new Date();
         const out = [];
         for (let i = 6; i >= 0; i--) {
             const d = new Date(now);
             d.setDate(now.getDate() - i);
-            const key = localDate(d);
+            const key = LocalDate(d);
             const wd = d.getDay();
             const val = days[key];
             out.push({
@@ -864,14 +882,14 @@
         return out;
     }
 
-    async function buildState() {
-        const org = await getOrg(); // throws → error card
-        const usage = await getJSON(
+    async function BuildState() {
+        const org = await GetOrg(); // throws → error card
+        const usage = await GetJson(
             `${BASE}/api/organizations/${org.id}/usage`
         ); // throws → error card
-        const plan = planLabel(org.caps);
+        const plan = PlanLabel(org.caps);
 
-        let routines = await fetchRoutines(org.id); // never throws
+        let routines = await FetchRoutines(org.id); // never throws
         if (plan === 'Pro' && (!routines || routines.limit <= 0)) {
             routines = { used: 0, limit: PRO_ROUTINE_LIMIT };
         }
@@ -891,24 +909,22 @@
               }
             : { available: false };
 
-        updateHistory(weekly, sd.resets_at);
+        UpdateHistory(weekly, sd.resets_at);
         const breakdown = routines.limit > 0 || extra.available;
 
         return {
             plan,
             session,
             weekly,
-            sessionResetIn: humanize(fh.resets_at),
-            weeklyResetIn: humanize(sd.resets_at),
+            sessionResetIn: Humanize(fh.resets_at),
+            weeklyResetIn: Humanize(sd.resets_at),
             routines,
             extra,
-            daily: buildDaily(breakdown),
+            daily: BuildDaily(breakdown),
         };
     }
 
-    /* =====================================================================
-     8. RENDER + MOUNT + LOOP
-     ===================================================================== */
+    /* === 8. Render + mount + loop === */
     let host = null,
         shadow = null,
         rootEl = null;
@@ -916,61 +932,61 @@
         lastError = null,
         inFlight = false;
 
-    function setCollapsed(v) {
-        saveJSON(COLLAPSE_KEY, v);
-        render();
+    function SetCollapsed(v) {
+        SaveValue(COLLAPSE_KEY, v);
+        Render();
     }
 
-    function render() {
+    function Render() {
         if (!rootEl) return;
-        const collapsed = loadJSON(COLLAPSE_KEY, false);
+        const collapsed = LoadValue(COLLAPSE_KEY, false);
         let html;
-        if (lastError) html = errorHTML(lastError);
-        else if (!lastState) html = loadingHTML();
-        else if (collapsed) html = pillHTML(lastState);
-        else html = expandedHTML(lastState);
+        if (lastError) html = ErrorHtml(lastError);
+        else if (!lastState) html = LoadingHtml();
+        else if (collapsed) html = PillHtml(lastState);
+        else html = ExpandedHtml(lastState);
 
         rootEl.innerHTML = html;
-        wireEvents();
-        applyPos(host);
+        WireEvents();
+        ApplyPos(host);
     }
 
-    function wireEvents() {
+    function WireEvents() {
         const refresh = rootEl.querySelector('.refresh');
         if (refresh)
             refresh.addEventListener('click', (e) => {
                 e.stopPropagation();
                 refresh.classList.add('spinning');
-                refreshNow();
+                RefreshNow();
             });
 
         const x = rootEl.querySelector('.x');
         if (x)
             x.addEventListener('click', (e) => {
                 e.stopPropagation();
-                setCollapsed(true);
+                SetCollapsed(true);
             });
 
         const retry = rootEl.querySelector('.retry');
         if (retry)
             retry.addEventListener('click', (e) => {
                 e.stopPropagation();
-                refreshNow();
+                RefreshNow();
             });
 
         const header = rootEl.querySelector('.ed-top');
-        if (header) makeDraggable(host, header, null);
+        if (header) MakeDraggable(host, header, null);
 
         const pill = rootEl.querySelector('.card.collapsed');
         if (pill && lastState)
-            makeDraggable(host, pill, () => setCollapsed(false));
+            MakeDraggable(host, pill, () => SetCollapsed(false));
     }
 
-    async function refreshNow() {
+    async function RefreshNow() {
         if (inFlight) return;
         inFlight = true;
         try {
-            lastState = await buildState();
+            lastState = await BuildState();
             lastError = null;
         } catch (e) {
             lastError =
@@ -979,11 +995,11 @@
                     : (e && e.message) || 'Unknown error';
         } finally {
             inFlight = false;
-            render();
+            Render();
         }
     }
 
-    function mount() {
+    function Mount() {
         host = document.createElement('div');
         host.id = 'cut-host';
         host.style.cssText = 'position:fixed;z-index:2147483600;';
@@ -996,7 +1012,7 @@
         shadow.append(style, rootEl);
 
         document.body.appendChild(host);
-        applyPos(host);
+        ApplyPos(host);
 
         // Fonts load at document scope; @font-face is global and reaches the shadow.
         if (!document.getElementById('cut-fonts')) {
@@ -1009,35 +1025,52 @@
     }
 
     // SPA re-mount: Claude tears down document.body children on navigation.
-    function observeBody() {
+    function ObserveBody() {
         const obs = new MutationObserver(() => {
             if (host && !document.body.contains(host)) {
                 document.body.appendChild(host);
-                applyPos(host);
+                ApplyPos(host);
             }
         });
         obs.observe(document.body, { childList: true });
     }
 
     let resizeTimer = null;
-    function onResize() {
+    function OnResize() {
         clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => applyPos(host), 150);
+        resizeTimer = setTimeout(() => ApplyPos(host), 150);
     }
 
-    function init() {
+    // Tampermonkey dashboard menu — quick actions without touching the widget.
+    function RegisterMenu() {
+        GM_registerMenuCommand('Refresh now', () => RefreshNow());
+        GM_registerMenuCommand('Toggle collapsed', () =>
+            SetCollapsed(!LoadValue(COLLAPSE_KEY, false))
+        );
+        GM_registerMenuCommand('Reset position', () => {
+            GM_deleteValue(POS_KEY);
+            ApplyPos(host);
+        });
+        GM_registerMenuCommand('Clear 7-day history', () => {
+            GM_deleteValue(HIST_KEY);
+            RefreshNow();
+        });
+    }
+
+    function Init() {
         if (document.getElementById('cut-host')) return;
-        mount();
-        render(); // initial loading pill
-        refreshNow(); // first fetch
-        setInterval(refreshNow, POLL_MS);
-        observeBody();
-        window.addEventListener('resize', onResize);
+        Mount();
+        Render(); // initial loading pill
+        RefreshNow(); // first fetch
+        setInterval(RefreshNow, POLL_MS);
+        ObserveBody();
+        RegisterMenu();
+        window.addEventListener('resize', OnResize);
     }
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
+        document.addEventListener('DOMContentLoaded', Init);
     } else {
-        init();
+        Init();
     }
 })();
