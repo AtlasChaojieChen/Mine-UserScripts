@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CUT harness</title>
+<style>
+  body { margin:0; min-height:100vh; background:
+    radial-gradient(120% 90% at 15% 0%, #20201d 0%, #141312 55%, #0c0b0a 100%); }
+  #note { position:fixed; top:12px; left:16px; color:#8b8275;
+    font:12px/1.5 monospace; max-width:420px; }
+</style>
+</head>
+<body>
+<div id="note">Test harness — fetch stubbed with the real captured claude.ai payloads.
+Expect: PRO card, session 85%, weekly 37%, Extra Usage On $0.00 / $20.00, Balance $20.00,
+Routines 2 / 5. The 7-day chart shows today seeded at 0% (first run).</div>
+<script>
+  /* Representative payloads modelled on a live Pro account (2026-06-03). UUID is a dummy. */
+  const ORG = [{ uuid: '00000000-0000-0000-0000-000000000000', capabilities: ['chat', 'claude_pro'] }];
+  const USAGE = {
+    five_hour: { utilization: 85.0, resets_at: new Date(Date.now() + 2.35 * 3600e3).toISOString() },
+    seven_day: { utilization: 37.0, resets_at: new Date(Date.now() + (5 * 86400 + 6 * 3600) * 1e3).toISOString() },
+    seven_day_cowork: null,
+    extra_usage: { is_enabled: true, monthly_limit: 2000, used_credits: 0.0, utilization: null, currency: 'USD', disabled_reason: null },
+  };
+  // run-budget shape is unverified; harness assumes top-level used/limit.
+  const ROUTINES = { used: 2, limit: 5 };
+
+  // Free account: only 'chat' capability, no extra_usage, routines unavailable.
+  const ORG_FREE = [{ uuid: 'free-uuid', capabilities: ['chat'] }];
+  const USAGE_FREE = {
+    five_hour: { utilization: 78.0, resets_at: new Date(Date.now() + 54 * 60e3).toISOString() },
+    seven_day: { utilization: 22.0, resets_at: new Date(Date.now() + (3 * 86400 + 3600) * 1e3).toISOString() },
+    extra_usage: null,
+  };
+
+  const mode = new URLSearchParams(location.search).get('mode') || 'pro';
+
+  window.fetch = function (url) {
+    if (mode === 'error') {
+      return Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
+    }
+    const org = mode === 'free' ? ORG_FREE : ORG;
+    const usage = mode === 'free' ? USAGE_FREE : USAGE;
+    let body;
+    if (url.endsWith('/api/organizations')) body = org;
+    else if (url.includes('/usage')) body = usage;
+    else if (url.includes('run-budget')) {
+      if (mode === 'free') return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) });
+      body = ROUTINES;
+    } else return Promise.reject(new Error('unexpected url ' + url));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+  };
+</script>
+<script src="Claude-Usage-Tracker.user.js"></script>
+</body>
+</html>
