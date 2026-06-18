@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Usage Tracker
 // @namespace    https://github.com/atlas/claude-usage-tracker
-// @version      2.0.0
-// @description  Floating usage dashboard for claude.ai — session/weekly rings, routines, extra-usage credits, reset timers, and a locally reconstructed 7-day chart. Reads the exact values Claude exposes in Settings → Usage.
+// @version      2.1.1
+// @description  Floating usage dashboard for claude.ai — session/weekly rings, routines, extra-usage credits, live-ticking reset timers, and a locally reconstructed 7-day chart. Reads the exact values Claude exposes in Settings → Usage.
 // @author       atlas
 // @match        https://claude.ai/*
 // @downloadURL  https://raw.githubusercontent.com/AtlasChaojieChen/Mine-UserScripts/main/claude-usage-tracker/claude-usage-tracker.user.js
@@ -22,15 +22,15 @@
     'use strict';
 
     /* === 1. Config / constants === */
-    const POLL_MS = 60000; // re-read usage every 60s
-    const CREDIT_DIVISOR = 100; // extra_usage amounts are in cents → dollars
+    const POLL_MS = 60000;
+    const TICK_MS = 1000;
+    const CREDIT_DIVISOR = 100;
     const POS_KEY = 'cut_pos';
     const COLLAPSE_KEY = 'cut_collapsed';
     const HIST_KEY = 'cut_history';
     const FONTS_HREF =
         'https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..400&family=Instrument+Sans:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap';
 
-    // Anthropic-API headers required by the routines (run-budget) endpoint.
     const ROUTINE_HEADERS = {
         'anthropic-version': '2023-06-01',
         'anthropic-beta': 'ccr-triggers-2026-01-30',
@@ -38,14 +38,27 @@
     };
     const PRO_ROUTINE_LIMIT = 5;
 
-    /* === 2. Colour ramp (continuous, glow-aware; ported from the design mockup) === */
+    const Esc = (s) =>
+        String(s).replace(
+            /[&<>"']/g,
+            (c) =>
+                ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;',
+                })[c]
+        );
+
+    /* === 2. Colour ramp === */
     const RAMP = [
-        { stop: 0, color: [124, 184, 124] }, // #7cb87c  Editorial low
-        { stop: 25, color: [124, 184, 124] }, // hold green across 0–25
-        { stop: 45, color: [201, 189, 90] }, // #c9bd5a  midlow
-        { stop: 60, color: [212, 168, 87] }, // #d4a857  mid
-        { stop: 70, color: [226, 97, 78] }, // #e2614e  red-orange ~70%
-        { stop: 88, color: [237, 77, 58] }, // #ed4d3a  crit
+        { stop: 0, color: [124, 184, 124] },
+        { stop: 25, color: [124, 184, 124] },
+        { stop: 45, color: [201, 189, 90] },
+        { stop: 60, color: [212, 168, 87] },
+        { stop: 70, color: [226, 97, 78] },
+        { stop: 88, color: [237, 77, 58] },
         { stop: 100, color: [237, 77, 58] },
     ];
     const Lerp = (a, b, t) => a + (b - a) * t;
@@ -69,8 +82,7 @@
     const RingGlow = (pct) =>
         Math.min(1, 0.3 + (Clamp(pct, 0, 100) / 100) * 0.8).toFixed(3);
 
-    /* === 3. Storage (GM-native) + positioning === */
-    // GM_getValue stores native objects, so no JSON (de)serialisation is needed.
+    /* === 3. Storage + positioning === */
     function LoadValue(key, fallback) {
         try {
             const v = GM_getValue(key, undefined);
@@ -87,9 +99,8 @@
         }
     }
 
-    const DefaultPos = () => ({ corner: 'br', dx: 20, dy: 20 });
+    const DefaultPos = () => ({ corner: 'bl', dx: 12, dy: 16 });
 
-    // Subtle width-based scale so the widget feels right on small + large screens.
     const ComputeScale = () => Clamp(window.innerWidth / 1600, 0.8, 1.0);
 
     const ORIGIN = {
@@ -99,7 +110,6 @@
         br: 'bottom right',
     };
 
-    // Edge-anchored placement: nearest corner + offset, so it survives resize.
     function ApplyPos(host) {
         if (!host) return;
         const pos = LoadValue(POS_KEY, DefaultPos());
@@ -133,9 +143,10 @@
         });
     }
 
-    // Custom drag with a movement threshold separating click from drag.
+    let Dragging = false;
+
     function MakeDraggable(host, handle, onClick) {
-        handle.addEventListener('mousedown', (e) => {
+        handle.addEventListener('pointerdown', (e) => {
             if (e.button !== 0 || e.target.closest('button')) return;
             e.preventDefault();
             const start = host.getBoundingClientRect();
@@ -146,11 +157,19 @@
             host.style.left = start.left + 'px';
             host.style.top = start.top + 'px';
             let moved = false;
+            try {
+                handle.setPointerCapture(e.pointerId);
+            } catch {
+                /* capture unsupported */
+            }
 
             const move = (ev) => {
                 const dx = ev.clientX - startX,
                     dy = ev.clientY - startY;
-                if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+                if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+                    moved = true;
+                    Dragging = true;
+                }
                 const r = host.getBoundingClientRect();
                 const nl = Clamp(
                     start.left + dx,
@@ -166,21 +185,27 @@
                 host.style.top = nt + 'px';
             };
             const up = (ev) => {
-                document.removeEventListener('mousemove', move);
-                document.removeEventListener('mouseup', up);
+                handle.removeEventListener('pointermove', move);
+                handle.removeEventListener('pointerup', up);
+                handle.removeEventListener('pointercancel', up);
+                try {
+                    handle.releasePointerCapture(e.pointerId);
+                } catch {
+                    /* already released */
+                }
+                Dragging = false;
                 if (moved) {
                     PersistCorner(host);
                     ApplyPos(host);
                 } else if (onClick) onClick(ev);
             };
-            document.addEventListener('mousemove', move);
-            document.addEventListener('mouseup', up);
+            handle.addEventListener('pointermove', move);
+            handle.addEventListener('pointerup', up);
+            handle.addEventListener('pointercancel', up);
         });
     }
 
-    /* === 4. CSS — widget block from the mockup, injected into Shadow DOM so
-       claude.ai styles can't reach it (:host scoping; GM_addStyle is document-scoped
-       and would break this isolation, so it is intentionally not used) === */
+    /* === 4. CSS (injected into Shadow DOM) === */
     const CSS = `
   :host {
     --paper: #f5f4ee; --sec: #d6cfc4; --mute: #8b8275; --faint: #5e564e;
@@ -209,11 +234,12 @@
     background-size: 3px 3px; opacity: 0.5;
   }
   .card > * { position: relative; z-index: 1; }
-  .card.expanded { width: 372px; padding: 14px; }
+  .card.expanded { width: 360px; padding: 14px; }
 
   .ed-top {
     display: flex; justify-content: space-between; align-items: center;
     padding: 0 2px 2px; margin-bottom: 4px; cursor: move; user-select: none;
+    touch-action: none;
   }
   .ed-top .left { display: flex; align-items: center; gap: 7px; margin-left: 6px; }
   .ed-top .dot {
@@ -343,7 +369,6 @@
   .ed-daily .label {
     font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--mute); font-weight: 500;
   }
-  .ed-daily .meta { font-family: 'Fraunces', serif; font-style: italic; font-size: 11px; color: var(--mute); }
   .b-chart-wrap { position: relative; height: 90px; }
   .b-empty {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -372,6 +397,7 @@
   .card.collapsed {
     width: auto; display: inline-flex; align-items: center; gap: 11px;
     padding: 8px 16px; border-radius: 999px; cursor: pointer; transition: transform 150ms; user-select: none;
+    touch-action: none;
   }
   .card.collapsed:hover { transform: translateY(-1px); }
   .pill-mini { width: 27px; height: 27px; border-radius: 99px; flex: none; position: relative; }
@@ -400,7 +426,7 @@
   .err .retry:hover { background: rgba(255, 255, 255, 0.08); }
   `;
 
-    /* === 5. Component builders (ported from the mockup) === */
+    /* === 5. Component builders === */
     const RingDash = (pct, c) => ({
         da: c.toFixed(2),
         off: (c * (1 - Clamp(pct, 0, 100) / 100)).toFixed(2),
@@ -456,7 +482,7 @@
         return d;
     }
     function ChartHtml(daily) {
-        const hasData = daily.some((d) => (d.usage ?? 0) > 0);
+        const hasData = daily.some((d) => d.usage != null);
         if (!hasData) {
             return `<div class="b-empty">No recent usage data</div>`;
         }
@@ -604,7 +630,7 @@
       </div>`;
     }
 
-    /* === 6. Views (with live event wiring in Render) === */
+    /* === 6. Views === */
     function HasBreakdown(s) {
         return (
             (s.routines && s.routines.limit > 0) ||
@@ -634,8 +660,8 @@
     function TimersHtml(s) {
         return `
             <div class="cut-timers">
-              <span class="cut-timers-item"><span class="cut-tdot" style="background:${RampColor(s.session)};box-shadow:0 0 8px ${RampGlowCss(s.session)}"></span>Session · <em>${s.sessionResetIn}</em></span>
-              <span class="cut-timers-item"><span class="cut-tdot" style="background:${RampColor(s.weekly)};box-shadow:0 0 7px ${RampGlowCss(s.weekly)}"></span>Weekly · <em>${s.weeklyResetIn}</em></span>
+              <span class="cut-timers-item"><span class="cut-tdot" style="background:${RampColor(s.session)};box-shadow:0 0 8px ${RampGlowCss(s.session)}"></span>Session · <em data-reset="${Esc(s.sessionResetAt || '')}">${Humanize(s.sessionResetAt)}</em></span>
+              <span class="cut-timers-item"><span class="cut-tdot" style="background:${RampColor(s.weekly)};box-shadow:0 0 7px ${RampGlowCss(s.weekly)}"></span>Weekly · <em data-reset="${Esc(s.weeklyResetAt || '')}">${Humanize(s.weeklyResetAt)}</em></span>
             </div>`;
     }
 
@@ -658,7 +684,7 @@
 
     const ChartSection = (s) => `
         <div class="ed-daily">
-          <div class="head-row"><span class="label">Last 7 Days</span><span class="meta"></span></div>
+          <div class="head-row"><span class="label">Last 7 Days</span></div>
           <div class="b-chart-wrap">${ChartHtml(s.daily)}</div>
           <div class="lbls">${s.daily.map((d) => `<span class="${d.isToday ? 'today' : ''}">${d.label}</span>`).join('')}</div>
         </div>`;
@@ -704,7 +730,7 @@
         </div>
         <div class="err">
           <div class="msg">Couldn't fetch usage</div>
-          <div class="detail">${detail}</div>
+          <div class="detail">${Esc(detail)}</div>
           <button class="retry">Try again</button>
         </div>
       </div>`;
@@ -719,10 +745,8 @@
     }
 
     /* === 7. Data layer === */
-    const BASE = location.origin; // https://claude.ai
+    const BASE = location.origin;
 
-    // GM_xmlhttpRequest is a privileged XHR: it sends same-origin cookies, sets any
-    // header, and is immune to page CSP. Promise-wrapped so callers keep using await.
     function GetJson(url, opts = {}) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -731,20 +755,20 @@
                 headers: opts.headers || {},
                 responseType: 'json',
                 onload(res) {
-                    if (res.status >= 200 && res.status < 300) {
-                        try {
-                            resolve(
-                                res.response != null
-                                    ? res.response
-                                    : JSON.parse(res.responseText)
-                            );
-                        } catch (e) {
-                            reject(e);
-                        }
-                    } else {
+                    if (res.status < 200 || res.status >= 300) {
                         const e = new Error('HTTP ' + res.status);
                         e.status = res.status;
                         reject(e);
+                        return;
+                    }
+                    if (res.response != null) {
+                        resolve(res.response);
+                        return;
+                    }
+                    try {
+                        resolve(JSON.parse(res.responseText));
+                    } catch {
+                        reject(new Error('Bad JSON'));
                     }
                 },
                 onerror() {
@@ -774,8 +798,6 @@
         return 'Free';
     }
 
-    // Tolerant numeric extraction — the run-budget shape is unverified, so search
-    // top-level then one level of nesting for the named key.
     function PickNum(obj, key) {
         if (obj == null || typeof obj !== 'object') return null;
         if (typeof obj[key] === 'number') return obj[key];
@@ -799,7 +821,7 @@
             if (limit == null || limit <= 0) return { used: 0, limit: 0 };
             return { used: PickNum(r, 'used') ?? 0, limit };
         } catch {
-            return { used: 0, limit: 0 }; // unavailable (e.g. Free) → row hidden
+            return { used: 0, limit: 0 };
         }
     }
 
@@ -812,12 +834,13 @@
         const h = Math.floor(s / 3600);
         s -= h * 3600;
         const m = Math.floor(s / 60);
+        s -= m * 60;
         if (d > 0) return `${d}d ${h}h`;
         if (h > 0) return `${h}h ${m}m`;
-        return `${m}m`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
     }
 
-    /* 7-day chart: reconstructed locally from cumulative weekly % */
     function LocalDate(d = new Date()) {
         return (
             d.getFullYear() +
@@ -830,32 +853,48 @@
     const WD_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const WD_MINI = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
-    function UpdateHistory(weekly, resetAt) {
+    const ROLLOVER_JUMP_MS = 3600000;
+    function UpdateHistory(weekly, resetIso) {
         const h = LoadValue(HIST_KEY, {
             days: {},
             lastWeekly: null,
             lastResetAt: null,
+            baseline: 0,
         });
         if (typeof h.days !== 'object' || h.days == null) h.days = {};
+        if (typeof h.baseline !== 'number') h.baseline = 0;
         const today = LocalDate();
-        if (h.lastWeekly == null) {
-            h.lastWeekly = weekly; // first observation: establish the delta baseline
+        const resetMs = resetIso ? new Date(resetIso).getTime() : NaN;
+        const lastResetMs = h.lastResetAt
+            ? new Date(h.lastResetAt).getTime()
+            : NaN;
+
+        const rolled =
+            h.lastWeekly == null ||
+            (!isNaN(lastResetMs) && Date.now() >= lastResetMs) ||
+            (!isNaN(resetMs) &&
+                !isNaN(lastResetMs) &&
+                resetMs - lastResetMs > ROLLOVER_JUMP_MS);
+
+        if (rolled) {
+            h.days = {};
+            h.baseline = 0;
+            h.days[today] = weekly;
+            h.lastWeekly = weekly;
         } else {
-            // weekly is cumulative; a drop means the week reset, so attribute the new
-            // cumulative to today rather than producing a negative delta.
-            const delta =
-                weekly >= h.lastWeekly ? weekly - h.lastWeekly : weekly;
+            const delta = Math.max(0, weekly - h.lastWeekly);
             h.days[today] = (h.days[today] || 0) + delta;
             h.lastWeekly = weekly;
         }
-        // Today should never under-report current usage that isn't already attributed to
-        // earlier days. Recovers usage that predates the script's first run (baseline loss),
-        // so an existing 1% today shows on the chart instead of a misleading empty state.
+
+        const adjusted = Math.max(0, weekly - h.baseline);
         let earlier = 0;
         for (const k in h.days) if (k !== today) earlier += h.days[k] || 0;
-        h.days[today] = Math.max(h.days[today] || 0, weekly - earlier);
-        h.lastResetAt = resetAt || h.lastResetAt;
-        const cutoff = Date.now() - 8 * 86400000;
+        h.days[today] = Math.max(h.days[today] || 0, adjusted - earlier);
+
+        h.lastResetAt = resetIso || h.lastResetAt;
+
+        const cutoff = Date.now() - 7 * 86400000;
         for (const k in h.days) {
             if (new Date(k + 'T00:00:00').getTime() < cutoff) delete h.days[k];
         }
@@ -883,13 +922,13 @@
     }
 
     async function BuildState() {
-        const org = await GetOrg(); // throws → error card
+        const org = await GetOrg();
         const usage = await GetJson(
             `${BASE}/api/organizations/${org.id}/usage`
-        ); // throws → error card
+        );
         const plan = PlanLabel(org.caps);
 
-        let routines = await FetchRoutines(org.id); // never throws
+        let routines = await FetchRoutines(org.id);
         if (plan === 'Pro' && (!routines || routines.limit <= 0)) {
             routines = { used: 0, limit: PRO_ROUTINE_LIMIT };
         }
@@ -899,15 +938,18 @@
         const weekly = Math.round(sd.utilization || 0);
 
         const ex = usage.extra_usage;
-        const extra = ex
-            ? {
-                  available: true,
-                  enabled: !!ex.is_enabled,
-                  spent: (ex.used_credits || 0) / CREDIT_DIVISOR,
-                  limit: (ex.monthly_limit || 0) / CREDIT_DIVISOR,
-                  balance: (ex.used_credits || 0) / CREDIT_DIVISOR,
-              }
-            : { available: false };
+        let extra = { available: false };
+        if (ex) {
+            const spent = (ex.used_credits || 0) / CREDIT_DIVISOR;
+            const limit = (ex.monthly_limit || 0) / CREDIT_DIVISOR;
+            extra = {
+                available: true,
+                enabled: !!ex.is_enabled,
+                spent,
+                limit,
+                balance: Math.max(0, limit - spent),
+            };
+        }
 
         UpdateHistory(weekly, sd.resets_at);
         const breakdown = routines.limit > 0 || extra.available;
@@ -916,8 +958,8 @@
             plan,
             session,
             weekly,
-            sessionResetIn: Humanize(fh.resets_at),
-            weeklyResetIn: Humanize(sd.resets_at),
+            sessionResetAt: fh.resets_at || null,
+            weeklyResetAt: sd.resets_at || null,
             routines,
             extra,
             daily: BuildDaily(breakdown),
@@ -939,6 +981,7 @@
 
     function Render() {
         if (!rootEl) return;
+        if (Dragging) return;
         const collapsed = LoadValue(COLLAPSE_KEY, false);
         let html;
         if (lastError) html = ErrorHtml(lastError);
@@ -949,6 +992,14 @@
         rootEl.innerHTML = html;
         WireEvents();
         ApplyPos(host);
+    }
+
+    function Tick() {
+        if (!rootEl || Dragging) return;
+        const ems = rootEl.querySelectorAll('em[data-reset]');
+        ems.forEach((em) => {
+            em.textContent = Humanize(em.getAttribute('data-reset'));
+        });
     }
 
     function WireEvents() {
@@ -1014,7 +1065,6 @@
         document.body.appendChild(host);
         ApplyPos(host);
 
-        // Fonts load at document scope; @font-face is global and reaches the shadow.
         if (!document.getElementById('cut-fonts')) {
             const link = document.createElement('link');
             link.id = 'cut-fonts';
@@ -1024,7 +1074,6 @@
         }
     }
 
-    // SPA re-mount: Claude tears down document.body children on navigation.
     function ObserveBody() {
         const obs = new MutationObserver(() => {
             if (host && !document.body.contains(host)) {
@@ -1041,7 +1090,24 @@
         resizeTimer = setTimeout(() => ApplyPos(host), 150);
     }
 
-    // Tampermonkey dashboard menu — quick actions without touching the widget.
+    function ClearHistory() {
+        const weekly = lastState ? lastState.weekly : 0;
+        const resetAt = lastState ? lastState.weeklyResetAt : null;
+        const days = {};
+        const now = new Date();
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(now);
+            d.setDate(now.getDate() - i);
+            days[LocalDate(d)] = 0;
+        }
+        SaveValue(HIST_KEY, {
+            days,
+            lastWeekly: weekly,
+            lastResetAt: resetAt,
+            baseline: weekly,
+        });
+    }
+
     function RegisterMenu() {
         GM_registerMenuCommand('Refresh now', () => RefreshNow());
         GM_registerMenuCommand('Toggle collapsed', () =>
@@ -1052,7 +1118,7 @@
             ApplyPos(host);
         });
         GM_registerMenuCommand('Clear 7-day history', () => {
-            GM_deleteValue(HIST_KEY);
+            ClearHistory();
             RefreshNow();
         });
     }
@@ -1060,9 +1126,10 @@
     function Init() {
         if (document.getElementById('cut-host')) return;
         Mount();
-        Render(); // initial loading pill
-        RefreshNow(); // first fetch
+        Render();
+        RefreshNow();
         setInterval(RefreshNow, POLL_MS);
+        setInterval(Tick, TICK_MS);
         ObserveBody();
         RegisterMenu();
         window.addEventListener('resize', OnResize);
